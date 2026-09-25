@@ -177,12 +177,9 @@ void *run_thread(void *vargp) {
   int parseStringResult = parseString(buf, &result);
   if (parseStringResult) {
     printf("Invalid request\n");
-    exit(1);
   }
 
-  // printf("Method: %s\n", result.method);
-  // printf("Path: %s\n", result.path);
-  // printf("Version: %s\n", result.version);
+  /* find file contexts and check that file exists, can be read, and store file contents in some way*/
 
   /* format string response to send to the client, since send only sends a single string */
 
