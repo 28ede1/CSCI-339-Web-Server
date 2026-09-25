@@ -4,8 +4,9 @@ LDLIBS=-lpthread
 
 all: server
 
-server: server.c
+server: server.o
 
+server.o: server.c 
 
 clean:
 	rm -rf *.o *~ *.dSYM server
