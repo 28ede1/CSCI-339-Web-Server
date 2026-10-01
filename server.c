@@ -4,7 +4,6 @@
 * usage: echoserver <port>
 */
 
-<<<<<<< HEAD
 #include <stdio.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -18,6 +17,10 @@
 #include <sys/wait.h>
 #include <limits.h>
 #include <pthread.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <time.h>
+#include <sys/stat.h>
 
 #define BUFSIZE 1024
 
@@ -29,9 +32,17 @@ char version[9]; // version length, HTTP/1.1 or HTTP/1.0 (version + "\0")
 
 int parseString(char *str, request_params *result);
 
+// Ensures that requests stirngs are in the required format,
+// returns pointer to a request_params struct that 
+// stores the request action, file path, and HTTP version.
 int parseString(char *str, request_params *result) {
 
   char delimiter[] = " \n";
+
+  char *line_end = strchr(str, '\r');
+  if (line_end != NULL) {
+      *line_end = '\0';
+  }
 
   char *portion1 = strtok(str, delimiter);
 
@@ -42,17 +53,14 @@ int parseString(char *str, request_params *result) {
   char *portion4 = strtok(NULL, delimiter);
 
   if ((portion1 == NULL) || (portion2 == NULL) || (portion3 == NULL)) {
-    printf("Invalid request. Too few request parameters.\n");
     return 1;
   }
 
   if ((portion4 != NULL)) {
-    printf("Invalid request. Too many request parameters.\n");
     return 1;
   }
 
   if ((strcmp(portion1, "GET") != 0) || ((strcmp(portion3, "HTTP/1.1") != 0) && (strcmp(portion3, "HTTP/1.0") != 0) )){
-    printf("Invalid request. Incorrect request parameters.\n");
     return 1;
   }
 
@@ -61,6 +69,114 @@ int parseString(char *str, request_params *result) {
   strcpy(result->version, portion3);
   return 0;
 }
+
+void read_file(int connfd, const char *path);
+
+void read_file(int connfd, const char *path){
+	int file_fd = open(path, O_RDONLY);
+
+  time_t now = time(NULL);
+  struct tm gmt;
+  gmtime_r(&now, &gmt);
+
+  char date[100];
+  strftime(date, sizeof(date), "%a, %d %b %Y %H:%M:%S GMT", &gmt);
+  
+	if (file_fd == -1) { 
+
+    char response[512];
+
+		if (errno == ENOENT) { //shows us why open () failed
+
+      snprintf(response, sizeof(response),
+          "HTTP/1.1 404 Not Found\r\n"
+          "Content-Type: text/plain\r\n"
+          "Content-Length: 13\r\n"
+          "Date: %s\r\n"
+          "Connection: close\r\n"
+          "\r\n"
+          "404 Not Found",
+          date);
+
+      send(connfd, response, strlen(response), 0);
+      return;
+		} 	
+		else if (errno == EACCES){
+
+      snprintf(response, sizeof(response),
+          "HTTP/1.1 403 Forbidden\r\n"
+          "Content-Type: text/plain\r\n"
+          "Content-Length: 13\r\n"
+          "Date: %s\r\n"
+          "Connection: close\r\n"
+          "\r\n"
+          "403 Forbidden",
+          date);
+
+      send(connfd, response, strlen(response), 0);
+      return;
+		} 	
+		else {
+			perror("open"); //print another error, if one occured
+      return;
+		}
+	}
+  
+  const char *extension = strrchr(path, '.');
+  const char *content_type = "";
+
+  if (extension != NULL) {
+      if (strcmp(extension, ".gif") == 0)
+          content_type = "image/gif";
+      else if (strcmp(extension, ".txt") == 0)
+          content_type = "text/plain";
+      else if (strcmp(extension, ".jpg") == 0)
+          content_type = "image/jpeg";
+      else if (strcmp(extension, ".html") == 0)
+          content_type = "text/html";
+  }
+
+
+  struct stat file_info;
+
+  if (fstat(file_fd, &file_info) == -1) {
+      perror("fstat");
+      close(file_fd);
+      return;
+  }
+
+  char headers[512];
+
+  snprintf(headers, sizeof(headers),
+      "HTTP/1.1 200 OK\r\n"
+      "Content-Type: %s\r\n"
+      "Content-Length: %ld\r\n"
+      "Date: %s\r\n"
+      "Connection: close\r\n"
+      "\r\n",
+      content_type, (long)file_info.st_size, date);
+
+  send(connfd, headers, strlen(headers), 0);
+
+
+  // use stat library to check read permission 
+
+	char buffer[1048];
+	ssize_t bytes_read; 
+	// Read a chunk from the file into the buffer
+	while ((bytes_read = read(file_fd, buffer, sizeof(buffer))) > 0) {
+    // change to send
+		send(connfd, buffer, bytes_read, 0); 
+	// saves the number of bytes read in bytes read returns a positive number afterwards 
+	// for write() sends the bytes to the client 
+	} 
+	if (bytes_read == -1){
+		perror("read"); 
+    exit(1);
+	}
+	close (file_fd);
+}
+
 
 void *run_thread(void *vargp);
 
@@ -148,7 +264,6 @@ int main(int argc, char **argv) {
 void *run_thread(void *vargp) {
   char buf[BUFSIZE];             /* message buffer */
   int num_read;                  /* num bytes read */
-  // int num_sent;                  /* num bytes sent */
   int connfd = *((int *)vargp);  /* nasty pointer casting. this is our client fd */
   request_params result; /* to parse and store client request */
 
@@ -174,164 +289,49 @@ void *run_thread(void *vargp) {
   }
   printf("server received %d bytes: %s\n", num_read, buf);
 
-  /* parse string to ensure request format is good */
+  /* parse string to ensure request format is good; if bad, close connection, if it's HTTP/1.0 format*/
   int parseStringResult = parseString(buf, &result);
-  if (parseStringResult) {
-    printf("Invalid request\n");
+
+  // make a response string
+  time_t now = time(NULL);
+  struct tm gmt;
+  gmtime_r(&now, &gmt);
+
+  char date[100];
+  strftime(date, sizeof(date), "%a, %d %b %Y %H:%M:%S GMT", &gmt);
+  char response[512];
+
+  if (parseStringResult != 0) {
+    snprintf(response, sizeof(response),
+          "HTTP/1.1 400 Bad Request\r\n"
+          "Content-Type: text/plain\r\n"
+          "Content-Length: 15\r\n"
+          "Date: %s\r\n"
+          "Connection: close\r\n"
+          "\r\n"
+          "400 Bad Request",
+          date);
+
+    send(connfd, response, strlen(response), 0);
+    close(connfd);
+    return NULL;
   }
 
-  /* find file contexts and check that file exists, can be read, and store file contents in some way*/
+  // GET THE FILE EXTENSION AND CHECK WHAT TYPE TO FIGURE OUT WHAT CONTENT TYPE TO RETURN
+  // GET Content Lenght
+  /* find file contexts and check that file exists, can be read, and store file contents in some way */
+
+  char file_path[PATH_MAX + 6];
+
+  snprintf(file_path, sizeof(file_path), "files%s", result.path);
+
+  read_file(connfd, file_path);
 
   /* format string response to send to the client, since send only sends a single string */
-
-  /* send: echo the input string back to the client */
-  num_sent = send(connfd, buf, num_read, 0);
-  if (num_sent < 0)  {
-    printf("ERROR writing to socket\n");
-    exit(1);
-  }
 
   /* close client */
   shutdown(connfd, 0);
   close(connfd);
   return NULL;
 }
-=======
- #include <stdio.h>
- #include <unistd.h>
- #include <stdlib.h>
- #include <string.h>
- #include <errno.h>
- #include <fcntl.h>
- #include <netdb.h>
- #include <sys/types.h> 
- #include <sys/socket.h>
- #include <netinet/in.h>
- #include <arpa/inet.h>
- #include <sys/types.h>
- #include <sys/wait.h>
- #include <pthread.h>
  
- #define BUFSIZE 1024
- 
- void *run_thread(void *vargp);
- void send_file(int connfd, const char *path);  
-
- int main(int argc, char **argv) {
-   int listenfd;        /* listening socket */
-   int *connfd;         /* connection socket */
-   int portno;          /* port to listen on */
-   socklen_t clientlen; /* byte size of client's address */
-   pthread_t tid;       /* thread id */
-   int optval;
- 
-   struct sockaddr_in myaddr;  /* my ip address info */
-   struct sockaddr clientaddr; /* client's info */
- 
-   /* check command line args */
-   if (argc != 2) {
-     fprintf(stderr, "usage: %s <port>\n", argv[0]);
-     exit(1);
-   }
-   portno = atoi(argv[1]);
- 
-   /* first, set necessary fields in myaddr struct */
-   myaddr.sin_port = htons(portno);
-   myaddr.sin_family = AF_INET;
-   myaddr.sin_addr.s_addr = htonl(INADDR_ANY);
-     
-   /* make a socket for listening */
-   listenfd = socket(AF_INET, SOCK_STREAM, 0);
-   if (listenfd < 0) {
-     printf("ERROR opening socket\n");
-     exit(1);
-   }
- 
-   /* setsockopt: Optional but handy debugging trick that lets 
-    * us rerun the server on same port immediately after we kill it; 
-    * otherwise we have to wait about 20 secs. 
-    * Eliminates "ERROR on binding: Address already in use" error. 
-    */
-    optval = 1;
-   setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, (const void *)&optval , sizeof(int));
- 
-   /* bind: associate the listening socket (listenfd) with a specific IP address */
-   /* in this case we'll use myaddr since we already configured it */
-   if (bind(listenfd, (struct sockaddr*) &myaddr, sizeof(myaddr)) <0) {
-     printf("ERROR on binding\n");
-     exit(1);
-   }
- 
-   /* listen: make it a listening socket ready to accept connection requests */
-   if (listen(listenfd, 10) < 0) {
-     printf("ERROR on listen\n");
-     exit(1);
-   }
- 
-   /* main loop: wait for a connection request, echo input line, 
-      then close connection. */
-   while (1) {
- 
-     /* accept: wait for a connection request */
-     clientlen = sizeof(clientaddr);
- 
-     /* reserve space for connfd on heap, this is thread-safe! */
-     connfd = malloc(sizeof(int));  
-     *connfd = accept(listenfd, (struct sockaddr *)&clientaddr, &clientlen);
- 
-     if (*connfd < 0) {
-       printf("ERROR on accept\n");
-       exit(1);
-     }
- 
-     printf("Client connected!\n");
- 
-     /* try to create thread */
-     /* if successful, new thread will run function "run_thread" */
-     if (pthread_create(&tid, NULL, run_thread, connfd) !=0) {
-       printf("error creating threads\n");
-       exit(1);
-     }
- 
-   }
-   return 0;  
-}
- 
- /* new threads will start execution in this function */
- void *run_thread(void *vargp) {
-   char buf[BUFSIZE];             /* message buffer */
-   int num_read;                  /* num bytes read */
-   int num_sent;                  /* num bytes sent */
-   int connfd = *((int *)vargp);  /* nasty pointer casting. this is our client fd */
- 
-   /* detach this thread from parent thread */
-   if (pthread_detach(pthread_self()) != 0){
-     printf("error detaching\n");
-     exit(1);
-   }    
- 
-   /* free heap space for vargp since we have connfd */
-   free(vargp); 
- 
-   /* recv: read input string from the client */
-   bzero(buf, BUFSIZE);
-   num_read = recv(connfd, buf, BUFSIZE, 0);
-   if (num_read < 0) {
-     printf("ERROR reading from socket\n");
-     exit(1);
-   }
-   printf("server received %d bytes: %s\n", num_read, buf);
-   
-   /* send: echo the input string back to the client */
-   num_sent = send(connfd, buf, num_read, 0);
-   if (num_sent < 0)  {
-     printf("ERROR writing to socket\n");
-     exit(1);
-   }
-
-   /* close client */
-   shutdown(connfd, 0);
-   close(connfd);
-   return NULL;
- }
->>>>>>> 564aef6 (Update server file)
