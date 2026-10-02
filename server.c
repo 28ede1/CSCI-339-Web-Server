@@ -38,6 +38,9 @@ char version[9]; // version length, HTTP/1.1 or HTTP/1.0 (version + "\0")
   parseString ensures parses input (str) to ensure correct format,
   and uses a pointer to a request_params struct to store request parameters 
   if successful. Returns int representing the success or failure of parsing.
+
+  str is meant to be client input,
+  result is pointer that will store what is parsed
 */
 
 int parseString(char *str, request_params *result);
@@ -51,23 +54,33 @@ int parseString(char *str, request_params *result) {
   // in most cases \n alone will move the cursor to the next line in the leftmost position, 
   // but sometimes it wont, so \r\n will explicitly do that.
   
+  // strchr tries to findd the memory address of the first \r
+  // if it is found, at that memory address place a terminal character instead. 
   char *line_end = strchr(str, '\r');
   if (line_end != NULL) {
       *line_end = '\0';
   }
 
+  // strtok splits a string into pieces using separator characters.
+  // separators are essentially replaced with '\0' before storing a section.
+  // since we know the client requests includes spaces we can use this function
+  // to help extract the parmameters. Null is returned if there are no more pieces split by 
+  // the delimiters.
+
   char *portion1 = strtok(str, delimiter);
 
-  char *portion2 = strtok(NULL, delimiter);
+  char *portion2 = strtok(NULL, delimiter); // use NULL for successive calls.
 
   char *portion3 = strtok(NULL, delimiter);
 
   char *portion4 = strtok(NULL, delimiter);
 
+  // Request line should have no less than 3 parts
   if ((portion1 == NULL) || (portion2 == NULL) || (portion3 == NULL)) {
     return 1;
   }
 
+  // Request line should not have more than 3 parts
   if ((portion4 != NULL)) {
     return 1;
   }
@@ -82,11 +95,23 @@ int parseString(char *str, request_params *result) {
   return 0;
 }
 
+/* 
+read_file attempts to open the request file 
+and directly send a HTTP response to the comment.
+Contains handling for 404 and 403 errors.
+
+connfd is socket used to communicate with the connected client
+path is the requested file path.
+
+*/
 void read_file(int connfd, const char *path);
 
 void read_file(int connfd, const char *path){
+
+  // store the opened file
 	int file_fd = open(path, O_RDONLY);
 
+  // date calculaton
   time_t now = time(NULL);
   struct tm gmt;
   gmtime_r(&now, &gmt);
@@ -98,8 +123,11 @@ void read_file(int connfd, const char *path){
 
     char response[512];
 
-		if (errno == ENOENT) { //shows us why open () failed
+    // shows us why open () failed, ENOENT means no such file exists
+    // open() changes the value of errno so you can check what specific failure it is afterward
+		if (errno == ENOENT) { 
 
+      // snprinf allows you to combine fixed text with values calculated after program runs
       snprintf(response, sizeof(response),
           "HTTP/1.1 404 Not Found\r\n"
           "Content-Type: text/plain\r\n"
@@ -113,6 +141,7 @@ void read_file(int connfd, const char *path){
       send(connfd, response, strlen(response), 0);
       return;
 		} 	
+    // EACCES means no authorized access to that file
 		else if (errno == EACCES){
 
       snprintf(response, sizeof(response),
@@ -151,6 +180,7 @@ void read_file(int connfd, const char *path){
 
   struct stat file_info;
 
+  // check if file allows you to get meta data info
   if (fstat(file_fd, &file_info) == -1) {
       perror("fstat");
       close(file_fd);
@@ -176,7 +206,7 @@ void read_file(int connfd, const char *path){
 	ssize_t bytes_read; 
 	// Read a chunk from the file into the buffer
 	while ((bytes_read = read(file_fd, buffer, sizeof(buffer))) > 0) {
-    // change to send
+    // send buffer information to client
 		send(connfd, buffer, bytes_read, 0); 
 	// saves the number of bytes read in bytes read returns a positive number afterwards 
 	// for write() sends the bytes to the client 
@@ -209,7 +239,7 @@ int main(int argc, char **argv) {
   }
   portno = atoi(argv[1]);
 
-  /* first, set necessary fields in myaddr struct */
+  /* first, set necessary fields in myaddr struct to hold address and port */
   myaddr.sin_port = htons(portno);
   myaddr.sin_family = AF_INET;
   myaddr.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -294,6 +324,9 @@ void *run_thread(void *vargp) {
   while (1) {
     /* recv: read input string from the client */
     bzero(buf, BUFSIZE);
+
+    // if this is the second time this is visited, the server would pause here and wait for 
+    // client to send something
     num_read = recv(connfd, buf, BUFSIZE, 0);
     if (num_read < 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -309,7 +342,7 @@ void *run_thread(void *vargp) {
     /* parse string to ensure request format is good; if bad, close connection, if it's HTTP/1.0 format*/
     int parseStringResult = parseString(buf, &result);
 
-    // make a response string
+    // set date and time information
     time_t now = time(NULL);
     struct tm gmt;
     gmtime_r(&now, &gmt);
@@ -318,6 +351,7 @@ void *run_thread(void *vargp) {
     strftime(date, sizeof(date), "%a, %d %b %Y %H:%M:%S GMT", &gmt);
     char response[512];
 
+    // make a failure response string that is sent to client
     if (parseStringResult != 0) {
       snprintf(response, sizeof(response),
             "HTTP/1.1 400 Bad Request\r\n"
@@ -334,32 +368,40 @@ void *run_thread(void *vargp) {
       return NULL;
     }
 
-    // GET THE FILE EXTENSION AND CHECK WHAT TYPE TO FIGURE OUT WHAT CONTENT TYPE TO RETURN
-    // GET Content Lenght
     /* find file contexts and check that file exists, can be read, and store file contents in some way */
+
+    // adds "files" to path name 
+    // needed because the browser requests stuff like /index.html which may exist on server side
+    // but in a folder like "files" with the path name files/index.html. We decide to put 
+    // index.html in files so that was the only reason these next two lines were added
 
     char file_path[PATH_MAX + 6];
 
     snprintf(file_path, sizeof(file_path), "files%s", result.path);
 
+
+    // send response headers + response body containing the file info if found
     read_file(connfd, file_path);
 
-    /* format string response to send to the client, since send only sends a single string */
-
-    /* close client */
-    // shutdown(connfd, 0);
+    // to immediately close the connection break the while loop;
+    // HTTP/1.0 requests close connection after succesful response
 
     if (strcmp(result.version, "HTTP/1.0") == 0) {
       break;
     };
 
-    // sets how long (5 secs) it takes socket to recieve data
+    // hold a duration (does nothing on its own), this is for 5 seconds 0 miliseconds
     struct timeval tv = {5, 0};
+    
+    // for connfd make recv() stop waiting after 5 seconds if no data arrives
+    // this doesnt wait five seconds itself it just configures how later recieve calls behave
     setsockopt(connfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    
 
     }
 
   close(connfd);
+  printf("Connection closed\n");
   return NULL;
 }
  
