@@ -1,44 +1,56 @@
 /* 
-* echoserver.c - A simple connection-based echo server 
-* added support for multiple threads
-* usage: echoserver <port>
+* server.c - Listens for GET  client request and sends a response
+to each client. <port>
 */
 
-#include <stdio.h>
-#include <unistd.h>
-#include <stdlib.h>
-#include <string.h>
-#include <netdb.h>
-#include <sys/types.h> 
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <limits.h>
-#include <pthread.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <time.h>
-#include <sys/stat.h>
+#include <stdio.h> // standard input output libraryies
+#include <unistd.h> // unix OS system call functions
+#include <stdlib.h> // utilities for allocating memory, converting types, and exiting
+#include <string.h> // string functions like strlen(), strcmp(), memcpy()
+#include <netdb.h> // looking up network addresses
+#include <sys/types.h> // types used for OS functions like ssize_t for byte counts
+#include <sys/socket.h> // for creating and using sockets
+#include <netinet/in.h> // internet address structs and constants
+#include <arpa/inet.h> // converting IP addresses between readable text and binary
+#include <sys/wait.h> // functions for waiting for a child process to
+#include <limits.h> // constants for limits on int values and other quantities
+#include <pthread.h> // for creating and managing threads
+#include <errno.h> // for accesssing error codes to explain why OS calls failed
+#include <fcntl.h> // opening files and controlling access
+#include <time.h> // working with dates and times
+#include <sys/stat.h> // getting file information like size, permissions, etc
+#include <time.h> // for time operations
 
 #define BUFSIZE 1024
 
+/* 
+  request_params struct allows for easier storing and accessing
+  of client request information
+*/
+
 typedef struct {
-char method[4]; // method length, only GET will be supported, so use 4 (GET + "\0")
+char method[4]; // method length, only GET will be supported, so use size 4 (GET + "\0")
 char path[PATH_MAX]; // length of longest path of whatever machine the code compiles on
 char version[9]; // version length, HTTP/1.1 or HTTP/1.0 (version + "\0")
 } request_params;
 
+/*
+  parseString ensures parses input (str) to ensure correct format,
+  and uses a pointer to a request_params struct to store request parameters 
+  if successful. Returns int representing the success or failure of parsing.
+*/
+
 int parseString(char *str, request_params *result);
 
-// Ensures that requests stirngs are in the required format,
-// returns pointer to a request_params struct that 
-// stores the request action, file path, and HTTP version.
 int parseString(char *str, request_params *result) {
 
   char delimiter[] = " \n";
 
+  // \r means move the cursor to the beginning of the current line.
+  // \r\n means move the cursor to the beginning of the current line then go to the next line
+  // in most cases \n alone will move the cursor to the next line in the leftmost position, 
+  // but sometimes it wont, so \r\n will explicitly do that.
+  
   char *line_end = strchr(str, '\r');
   if (line_end != NULL) {
       *line_end = '\0';
@@ -152,7 +164,6 @@ void read_file(int connfd, const char *path){
       "Content-Type: %s\r\n"
       "Content-Length: %ld\r\n"
       "Date: %s\r\n"
-      "Connection: close\r\n"
       "\r\n",
       content_type, (long)file_info.st_size, date);
 
@@ -280,57 +291,74 @@ void *run_thread(void *vargp) {
   /* free heap space for vargp since we have connfd */
   free(vargp); 
 
-  /* recv: read input string from the client */
-  bzero(buf, BUFSIZE);
-  num_read = recv(connfd, buf, BUFSIZE, 0);
-  if (num_read < 0) {
-    printf("ERROR reading from socket\n");
-    exit(1);
-  }
-  printf("server received %d bytes: %s\n", num_read, buf);
+  while (1) {
+    /* recv: read input string from the client */
+    bzero(buf, BUFSIZE);
+    num_read = recv(connfd, buf, BUFSIZE, 0);
+    if (num_read < 0) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        printf("Connection timed out\n");
+      }
+      else {
+        printf("ERROR reading from socket, or connection time out.\n");
+      }
+      break;
+    }
+    printf("server received %d bytes: %s\n", num_read, buf);
 
-  /* parse string to ensure request format is good; if bad, close connection, if it's HTTP/1.0 format*/
-  int parseStringResult = parseString(buf, &result);
+    /* parse string to ensure request format is good; if bad, close connection, if it's HTTP/1.0 format*/
+    int parseStringResult = parseString(buf, &result);
 
-  // make a response string
-  time_t now = time(NULL);
-  struct tm gmt;
-  gmtime_r(&now, &gmt);
+    // make a response string
+    time_t now = time(NULL);
+    struct tm gmt;
+    gmtime_r(&now, &gmt);
 
-  char date[100];
-  strftime(date, sizeof(date), "%a, %d %b %Y %H:%M:%S GMT", &gmt);
-  char response[512];
+    char date[100];
+    strftime(date, sizeof(date), "%a, %d %b %Y %H:%M:%S GMT", &gmt);
+    char response[512];
 
-  if (parseStringResult != 0) {
-    snprintf(response, sizeof(response),
-          "HTTP/1.1 400 Bad Request\r\n"
-          "Content-Type: text/plain\r\n"
-          "Content-Length: 15\r\n"
-          "Date: %s\r\n"
-          "Connection: close\r\n"
-          "\r\n"
-          "400 Bad Request",
-          date);
+    if (parseStringResult != 0) {
+      snprintf(response, sizeof(response),
+            "HTTP/1.1 400 Bad Request\r\n"
+            "Content-Type: text/plain\r\n"
+            "Content-Length: 15\r\n"
+            "Date: %s\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+            "400 Bad Request",
+            date);
 
-    send(connfd, response, strlen(response), 0);
-    close(connfd);
-    return NULL;
-  }
+      send(connfd, response, strlen(response), 0);
+      close(connfd);
+      return NULL;
+    }
 
-  // GET THE FILE EXTENSION AND CHECK WHAT TYPE TO FIGURE OUT WHAT CONTENT TYPE TO RETURN
-  // GET Content Lenght
-  /* find file contexts and check that file exists, can be read, and store file contents in some way */
+    // GET THE FILE EXTENSION AND CHECK WHAT TYPE TO FIGURE OUT WHAT CONTENT TYPE TO RETURN
+    // GET Content Lenght
+    /* find file contexts and check that file exists, can be read, and store file contents in some way */
 
-  char file_path[PATH_MAX + 6];
+    char file_path[PATH_MAX + 6];
 
-  snprintf(file_path, sizeof(file_path), "files%s", result.path);
+    snprintf(file_path, sizeof(file_path), "files%s", result.path);
 
-  read_file(connfd, file_path);
+    read_file(connfd, file_path);
 
-  /* format string response to send to the client, since send only sends a single string */
+    /* format string response to send to the client, since send only sends a single string */
 
-  /* close client */
-  shutdown(connfd, 0);
+    /* close client */
+    // shutdown(connfd, 0);
+
+    if (strcmp(result.version, "HTTP/1.0") == 0) {
+      break;
+    };
+
+    // sets how long (5 secs) it takes socket to recieve data
+    struct timeval tv = {5, 0};
+    setsockopt(connfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    }
+
   close(connfd);
   return NULL;
 }
